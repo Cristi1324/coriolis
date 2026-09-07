@@ -12,7 +12,7 @@ import uuid
 from oslo_log import log as logging
 from packaging import version
 
-from coriolis import constants, exception, utils
+from coriolis import constants, exception, utils, windows_ssh
 from coriolis.osmorphing import base
 from coriolis.osmorphing.osdetect import windows as windows_osdetect
 
@@ -30,6 +30,7 @@ SERVICE_PATH_FORMAT = "HKLM:\\%s\\ControlSet001\\Services\\%s"
 RUN_PATH_FORMAT = "HKLM:\\%s\\\Microsoft\\Windows\\CurrentVersion\\Run"
 UNINSTALL_PATH_FORMAT = "HKLM:\\%s\\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*"
 CLOUDBASEINIT_SERVICE_NAME = "cloudbase-init"
+CLOUDBASEINIT_ZIP_PATH = "c:\\cloudbaseinit.zip"
 CLOUDBASE_INIT_DEFAULT_PLUGINS = [
     'cloudbaseinit.plugins.common.mtu.MTUPlugin',
     'cloudbaseinit.plugins.windows.ntpclient.NTPClientPlugin',
@@ -234,6 +235,8 @@ class BaseWindowsMorphingTools(base.BaseOSMorphingTools):
         self._edition_id = detected_os_info['edition_id']
         self._installation_type = detected_os_info['installation_type']
         self._product_name = detected_os_info['product_name']
+        self._cbslinit_extract_job = None
+        self._virtio_iso_job = None
 
     def _get_worker_os_drive_path(self):
         return self._conn.exec_ps_command(
@@ -511,6 +514,140 @@ class BaseWindowsMorphingTools(base.BaseOSMorphingTools):
     def _get_cbslinit_scripts_dir(self, base_dir):
         return "%s\\LocalScripts" % base_dir
 
+    def _ps_single_quote(self, value):
+        return str(value).replace("'", "''")
+
+    def _get_cloudbase_init_zip_url(self):
+        url = self._osmorphing_parameters.get("cloudbase_init_zip_url") or ""
+        if url:
+            return url
+        arch_map = self._osmorphing_parameters.get(
+            "cloudbase_init_zip_url_arch_map", {}
+        )
+        return arch_map.get("amd64") or ""
+
+    def _build_http_download_script(self, download_url, dest_path):
+        url = self._ps_single_quote(download_url)
+        dest = self._ps_single_quote(dest_path)
+        return (
+            "$ProgressPreference = 'SilentlyContinue'; "
+            "$ErrorActionPreference = 'Stop'; "
+            "[Net.ServicePointManager]::SecurityProtocol = "
+            "[Net.SecurityProtocolType]::Tls12; "
+            "if (!([System.Management.Automation.PSTypeName]"
+            "'System.Net.Http.HttpClient').Type) { "
+            "[System.Reflection.Assembly]::LoadWithPartialName("
+            "'System.Net.Http') | Out-Null }; "
+            "(New-Object System.Net.Http.HttpClient).GetStreamAsync('%s')"
+            ".Result.CopyTo((New-Object IO.FileStream '%s', Create, Write, "
+            "None), 1MB)" % (url, dest)
+        )
+
+    def _build_cbslinit_extract_script(self, download_url, dest_dir):
+        zip_path = self._ps_single_quote(CLOUDBASEINIT_ZIP_PATH)
+        dest = self._ps_single_quote(dest_dir)
+        return (
+            "%s; "
+            "New-Item -ItemType Directory -Force -Path '%s' | Out-Null; "
+            "Expand-Archive -LiteralPath '%s' -DestinationPath '%s' -Force"
+            % (
+                self._build_http_download_script(download_url, CLOUDBASEINIT_ZIP_PATH),
+                dest,
+                zip_path,
+                dest,
+            )
+        )
+
+    def _start_ssh_background_job(self, script, progress_message):
+        if not isinstance(self._conn, windows_ssh.WindowsSSHConnection):
+            LOG.info("Background downloads are only used with Windows SSH. Skipping.")
+            return None
+        self._event_manager.progress_update(progress_message)
+        return self._conn.start_background_ps(
+            script, timeout=self._osmorphing_operation_timeout
+        )
+
+    def _prefetch_cloudbase_init(self, download_url):
+        """Start cloudbase-init download on a second SSH channel."""
+        if self._cbslinit_extract_job:
+            return
+        if not download_url:
+            LOG.info("No cloudbase-init ZIP URL. Skipping background extract.")
+            return
+        self._cbslinit_extract_job = self._start_ssh_background_job(
+            self._build_cbslinit_extract_script(
+                download_url, self._get_cbslinit_base_dir()
+            ),
+            "Downloading cloudbase-init in the background",
+        )
+
+    def _prefetch_virtio_iso(self, download_url=None):
+        """Start virtio-win ISO download on a second SSH channel."""
+        if self._virtio_iso_job:
+            return
+        url = download_url or self._osmorphing_parameters.get("windows_virtio_iso_url")
+        if not url:
+            LOG.info("No virtio-win ISO URL. Skipping background download.")
+            return
+        self._virtio_iso_job = self._start_ssh_background_job(
+            self._build_http_download_script(url, VIRTIO_WIN_ISO_PATH),
+            "Downloading virtio-win in the background",
+        )
+
+    def prefetch_packages(self):
+        self._prefetch_cloudbase_init(self._get_cloudbase_init_zip_url())
+        self._prefetch_virtio_iso()
+
+    def abort_prefetch(self):
+        for attr in ("_cbslinit_extract_job", "_virtio_iso_job"):
+            job = getattr(self, attr, None)
+            if job is None:
+                continue
+            abort = getattr(job, "abort", None)
+            if abort:
+                abort()
+            setattr(self, attr, None)
+
+    def _download_and_expand_cloudbase_init(self, download_url):
+        self._event_manager.progress_update("Downloading cloudbase-init")
+        utils.retry_on_error(sleep_seconds=5)(self._conn.download_file)(
+            download_url, CLOUDBASEINIT_ZIP_PATH
+        )
+        self._event_manager.progress_update("Installing cloudbase-init")
+        self._expand_archive(
+            CLOUDBASEINIT_ZIP_PATH, self._get_cbslinit_base_dir(), overwrite=False
+        )
+
+    def _wait_background_job(self, attr, fallback, *args):
+        job = getattr(self, attr, None)
+        if job is None:
+            fallback(*args)
+            return
+        job.wait(timeout=self._osmorphing_operation_timeout)
+        setattr(self, attr, None)
+
+    def _wait_cloudbase_init_extract(self, download_url):
+        if getattr(self, "_cbslinit_extract_job", None):
+            self._event_manager.progress_update("Waiting for cloudbase-init extract")
+        self._wait_background_job(
+            "_cbslinit_extract_job",
+            self._download_and_expand_cloudbase_init,
+            download_url,
+        )
+
+    def _download_virtio_iso(self, download_url):
+        self._event_manager.progress_update("Downloading virtio-win drivers")
+        utils.retry_on_error(sleep_seconds=5)(self._conn.download_file)(
+            download_url, VIRTIO_WIN_ISO_PATH
+        )
+
+    def _wait_virtio_iso(self, download_url):
+        if getattr(self, "_virtio_iso_job", None):
+            self._event_manager.progress_update("Waiting for virtio-win download")
+        self._wait_background_job(
+            "_virtio_iso_job", self._download_virtio_iso, download_url
+        )
+
     def _write_local_script(self, base_dir, script_path, priority=50):
         scripts_dir = self._get_cbslinit_scripts_dir(base_dir)
         remote_script_path = "%s\\%02d-%s" % (
@@ -614,17 +751,7 @@ class BaseWindowsMorphingTools(base.BaseOSMorphingTools):
             "%sWindows\\System32\\config\\SYSTEM" % self._os_root_dir,
         )
         try:
-            cloudbaseinit_zip_path = "c:\\cloudbaseinit.zip"
-
-            self._event_manager.progress_update("Downloading cloudbase-init")
-            utils.retry_on_error(sleep_seconds=5)(self._conn.download_file)(
-                download_url, cloudbaseinit_zip_path
-            )
-
-            self._event_manager.progress_update("Installing cloudbase-init")
-            self._expand_archive(
-                cloudbaseinit_zip_path, cloudbaseinit_base_dir, overwrite=False
-            )
+            self._wait_cloudbase_init_extract(download_url)
 
             log_dir = "%s\\Log" % cloudbaseinit_base_dir
             self._conn.exec_ps_command(
@@ -867,11 +994,7 @@ class BaseWindowsMorphingTools(base.BaseOSMorphingTools):
                 "in the OSMorphing parameters"
             )
 
-        self._event_manager.progress_update("Downloading virtio-win drivers")
-
-        utils.retry_on_error(sleep_seconds=5)(self._conn.download_file)(
-            virtio_iso_url, VIRTIO_WIN_ISO_PATH
-        )
+        self._wait_virtio_iso(virtio_iso_url)
 
         self._event_manager.progress_update("Adding virtio-win drivers")
 

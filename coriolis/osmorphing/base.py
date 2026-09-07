@@ -257,6 +257,18 @@ class BaseOSMorphingTools(object, with_metaclass(abc.ABCMeta)):
     def post_packages_uninstall(self, package_names):
         pass
 
+    def prefetch_packages(self):
+        """Start downloads that do not need exclusive guest resources.
+
+        Default is a no-op. Windows SSH tools may download virtio-win and
+        cloudbase-init while export uninstall runs.
+        """
+        pass
+
+    def abort_prefetch(self):
+        """Stop background downloads. Default is a no-op."""
+        pass
+
     def set_environment(self, environment):
         """Merges the given environment into the tools' own environment.
 

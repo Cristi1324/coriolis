@@ -278,6 +278,15 @@ class WindowsSSHConnectionTestCase(test_base.CoriolisBaseTestCase):
         self.conn._invoke_persistent_ps.assert_called_once_with(self.cmd, timeout=None)
         self.assertEqual(result, "std_out")
 
+    def test_start_background_ps(self):
+        self.conn._exec_command = mock.Mock(return_value=("out", "", 0))
+        job = self.conn.start_background_ps("Write-Output 1", timeout=10)
+        job.wait(timeout=2)
+        self.conn._exec_command.assert_called_once()
+        args = self.conn._exec_command.call_args
+        self.assertEqual(args[0][0], "powershell.exe")
+        self.assertIn("-EncodedCommand", args[0][1])
+
     def test_exec_ps_command_with_stderr(self):
         self.conn._invoke_persistent_ps = mock.Mock()
         self.conn._invoke_persistent_ps.return_value = ("std_out\n", "stderr", 0)

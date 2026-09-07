@@ -692,6 +692,78 @@ class BaseWindowsMorphingToolsTestCase(test_base.CoriolisBaseTestCase):
 
         self.assertEqual(result, cloudbaseinit_base_dir)
 
+    def test_prefetch_packages_skips_without_url(self):
+        self.morphing_tools._osmorphing_parameters = {}
+        conn = windows.windows_ssh.WindowsSSHConnection()
+        conn.start_background_ps = mock.Mock()
+        self.morphing_tools._conn = conn
+        self.morphing_tools.prefetch_packages()
+        conn.start_background_ps.assert_not_called()
+
+    def test_prefetch_packages_skips_without_windows_ssh(self):
+        self.morphing_tools._osmorphing_parameters["cloudbase_init_zip_url"] = (
+            "https://example.com/cbslinit.zip"
+        )
+        self.morphing_tools._conn.start_background_ps = mock.Mock()
+        self.morphing_tools.prefetch_packages()
+        self.morphing_tools._conn.start_background_ps.assert_not_called()
+
+    def test_prefetch_packages_starts_background_jobs(self):
+        self.morphing_tools._osmorphing_parameters["cloudbase_init_zip_url"] = (
+            "https://example.com/cbslinit.zip"
+        )
+        job = mock.Mock()
+        conn = windows.windows_ssh.WindowsSSHConnection()
+        conn.start_background_ps = mock.Mock(return_value=job)
+        self.morphing_tools._conn = conn
+        self.morphing_tools.prefetch_packages()
+        self.assertEqual(conn.start_background_ps.call_count, 2)
+        self.assertIs(self.morphing_tools._cbslinit_extract_job, job)
+        self.assertIs(self.morphing_tools._virtio_iso_job, job)
+
+    def test_wait_cloudbase_init_extract_joins_job(self):
+        job = mock.Mock()
+        self.morphing_tools._cbslinit_extract_job = job
+        self.morphing_tools._download_and_expand_cloudbase_init = mock.Mock()
+        self.morphing_tools._wait_cloudbase_init_extract("https://example.com/z.zip")
+        job.wait.assert_called_once()
+        self.morphing_tools._download_and_expand_cloudbase_init.assert_not_called()
+        self.assertIsNone(self.morphing_tools._cbslinit_extract_job)
+
+    def test_wait_virtio_iso_joins_job(self):
+        job = mock.Mock()
+        self.morphing_tools._virtio_iso_job = job
+        self.morphing_tools._download_virtio_iso = mock.Mock()
+        self.morphing_tools._wait_virtio_iso("https://example.com/virtio.iso")
+        job.wait.assert_called_once()
+        self.morphing_tools._download_virtio_iso.assert_not_called()
+        self.assertIsNone(self.morphing_tools._virtio_iso_job)
+
+    def test_wait_cloudbase_init_extract_downloads_without_job(self):
+        self.morphing_tools._download_and_expand_cloudbase_init = mock.Mock()
+        self.morphing_tools._wait_cloudbase_init_extract("https://example.com/z.zip")
+        self.morphing_tools._download_and_expand_cloudbase_init.assert_called_once_with(
+            "https://example.com/z.zip"
+        )
+
+    def test_wait_virtio_iso_downloads_without_job(self):
+        self.morphing_tools._download_virtio_iso = mock.Mock()
+        self.morphing_tools._wait_virtio_iso("https://example.com/virtio.iso")
+        self.morphing_tools._download_virtio_iso.assert_called_once_with(
+            "https://example.com/virtio.iso"
+        )
+
+    def test_abort_prefetch(self):
+        cbsl = mock.Mock()
+        virtio = mock.Mock()
+        self.morphing_tools._cbslinit_extract_job = cbsl
+        self.morphing_tools._virtio_iso_job = virtio
+        self.morphing_tools.abort_prefetch()
+        cbsl.abort.assert_called_once_with()
+        virtio.abort.assert_called_once_with()
+        self.assertIsNone(self.morphing_tools._cbslinit_extract_job)
+        self.assertIsNone(self.morphing_tools._virtio_iso_job)
+
     @mock.patch.object(windows.BaseWindowsMorphingTools, '_unload_registry_hive')
     @mock.patch.object(windows.BaseWindowsMorphingTools, '_check_cloudbase_init_exists')
     @mock.patch.object(

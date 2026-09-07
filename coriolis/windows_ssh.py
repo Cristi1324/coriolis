@@ -35,6 +35,7 @@ Not required for the SSH path
 
 import base64
 import socket
+import threading
 import time
 import uuid
 
@@ -119,6 +120,55 @@ def _split_on_marker_line(buf, marker):
     before = buf[:idx]
     after = rest[nl + 1 :]
     return before, line, after
+
+
+class BackgroundPSJob(object):
+    """One-shot powershell.exe on a second SSH channel."""
+
+    def __init__(self, conn, cmd, args, timeout):
+        self._conn = conn
+        self._cmd = cmd
+        self._args = args
+        self._timeout = timeout
+        self._error = None
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="cbslinit-prefetch")
+        self._thread.daemon = True
+
+    def start(self):
+        self._thread.start()
+
+    def _run(self):
+        try:
+            std_out, std_err, exit_code = self._conn._exec_command(
+                self._cmd,
+                self._args,
+                timeout=self._timeout,
+                sanitizable=False,
+            )
+            if exit_code:
+                self._error = exception.CoriolisException(
+                    "Background PowerShell command failed with exit code: %s\n"
+                    "stdout: %s\nstd_err: %s" % (exit_code, std_out, std_err)
+                )
+        except Exception as ex:
+            self._error = ex
+        finally:
+            self._done.set()
+
+    def wait(self, timeout=None):
+        finished = self._done.wait(timeout)
+        if not finished:
+            self.abort()
+            raise exception.OSMorphingSSHOperationTimeout(
+                cmd="background PowerShell", timeout=timeout
+            )
+        self._thread.join(timeout=5)
+        if self._error is not None:
+            raise self._error
+
+    def abort(self):
+        self._done.set()
 
 
 class WindowsSSHConnection(object):
@@ -561,6 +611,24 @@ class WindowsSSHConnection(object):
         if include_stderr:
             return _strip_ps_output(stdout), stderr
         return _strip_ps_output(stdout)
+
+    def start_background_ps(self, script, timeout=None):
+        """Run a PowerShell script on a new SSH exec channel.
+
+        Do not use the persistent PowerShell session. Hive work can continue
+        on that session while this job downloads or extracts files.
+        """
+        timeout = int(timeout or self._conn_timeout)
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        job = BackgroundPSJob(
+            self,
+            "powershell.exe",
+            ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+            timeout,
+        )
+        LOG.info("Starting background PowerShell job on %s:%s", self._host, self._port)
+        job.start()
+        return job
 
     def test_path(self, remote_path):
         ret_val = self.exec_ps_command("Test-Path -Path \"%s\"" % remote_path)

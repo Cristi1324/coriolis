@@ -192,6 +192,12 @@ class ManagerTestCase(test_base.CoriolisBaseTestCase):
         def run_user_script(self, user_script):
             pass
 
+        def prefetch_packages(self):
+            pass
+
+        def abort_prefetch(self):
+            pass
+
         def get_packages(self):
             return [['package1'], ['package2']]
 

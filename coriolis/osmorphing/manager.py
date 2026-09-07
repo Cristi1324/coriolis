@@ -334,45 +334,48 @@ def _morph_image(
     )
 
     (packages_add, _) = import_os_morphing_tools.get_packages()
+    import_os_morphing_tools.prefetch_packages()
+    try:
+        if export_os_morphing_tools:
+            (_, packages_remove) = export_os_morphing_tools.get_packages()
+            # Don't remove packages that need to be installed
+            packages_remove = list(set(packages_remove) - set(packages_add))
 
-    if export_os_morphing_tools:
-        (_, packages_remove) = export_os_morphing_tools.get_packages()
-        # Don't remove packages that need to be installed
-        packages_remove = list(set(packages_remove) - set(packages_add))
+            LOG.info("Pre packages uninstall")
+            export_os_morphing_tools.pre_packages_uninstall(packages_remove)
 
-        LOG.info("Pre packages uninstall")
-        export_os_morphing_tools.pre_packages_uninstall(packages_remove)
+            if packages_remove:
+                event_manager.progress_update(
+                    "Removing packages: %s" % str(packages_remove)
+                )
+                export_os_morphing_tools.uninstall_packages(packages_remove)
 
-        if packages_remove:
-            event_manager.progress_update(
-                "Removing packages: %s" % str(packages_remove)
-            )
-            export_os_morphing_tools.uninstall_packages(packages_remove)
+            LOG.info("Post packages uninstall")
+            export_os_morphing_tools.post_packages_uninstall(packages_remove)
 
-        LOG.info("Post packages uninstall")
-        export_os_morphing_tools.post_packages_uninstall(packages_remove)
+        LOG.info("Checking for packages already installed")
+        import_os_morphing_tools.get_installed_packages()
+        packages_add = list(
+            set(packages_add) - set(import_os_morphing_tools.installed_packages)
+        )
 
-    LOG.info("Checking for packages already installed")
-    import_os_morphing_tools.get_installed_packages()
-    packages_add = list(
-        set(packages_add) - set(import_os_morphing_tools.installed_packages)
-    )
+        LOG.info("Pre packages install")
+        import_os_morphing_tools.pre_packages_install(packages_add)
 
-    LOG.info("Pre packages install")
-    import_os_morphing_tools.pre_packages_install(packages_add)
+        nics_info = osmorphing_info.get('nics_info')
+        set_dhcp = osmorphing_info.get('nics_set_dhcp', True)
+        import_os_morphing_tools.set_net_config(nics_info, dhcp=set_dhcp)
+        LOG.info("Pre packages")
 
-    nics_info = osmorphing_info.get('nics_info')
-    set_dhcp = osmorphing_info.get('nics_set_dhcp', True)
-    import_os_morphing_tools.set_net_config(nics_info, dhcp=set_dhcp)
-    LOG.info("Pre packages")
+        if packages_add:
+            event_manager.progress_update("Adding packages: %s" % str(packages_add))
 
-    if packages_add:
-        event_manager.progress_update("Adding packages: %s" % str(packages_add))
+            import_os_morphing_tools.install_packages(packages_add)
 
-        import_os_morphing_tools.install_packages(packages_add)
-
-    LOG.info("Post packages install")
-    import_os_morphing_tools.post_packages_install(packages_add)
+        LOG.info("Post packages install")
+        import_os_morphing_tools.post_packages_install(packages_add)
+    finally:
+        import_os_morphing_tools.abort_prefetch()
 
     first_boot_user_scripts = [
         script["payload"]

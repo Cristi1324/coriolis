@@ -721,6 +721,26 @@ class BaseWindowsMorphingToolsTestCase(test_base.CoriolisBaseTestCase):
         self.assertIs(self.morphing_tools._cbslinit_extract_job, job)
         self.assertIs(self.morphing_tools._virtio_iso_job, job)
 
+    def test_prefetch_packages_starts_inline_steps(self):
+        session = mock.Mock()
+        session.target.return_value = mock.MagicMock()
+        session.target.return_value.__enter__.return_value = None
+        session.target.return_value.__exit__.return_value = None
+        self.morphing_tools._event_manager.inline_session = session
+        self.morphing_tools._osmorphing_parameters["cloudbase_init_zip_url"] = (
+            "https://example.com/cbslinit.zip"
+        )
+        conn = windows.windows_ssh.WindowsSSHConnection()
+        conn.start_background_ps = mock.Mock(return_value=mock.Mock())
+        self.morphing_tools._conn = conn
+        self.morphing_tools.prefetch_packages()
+        session.target.assert_any_call(
+            windows.constants.TASK_TYPE_OS_MORPHING_DOWNLOAD_CLOUDBASEINIT
+        )
+        session.target.assert_any_call(
+            windows.constants.TASK_TYPE_OS_MORPHING_DOWNLOAD_VIRTIO
+        )
+
     def test_wait_cloudbase_init_extract_joins_job(self):
         job = mock.Mock()
         self.morphing_tools._cbslinit_extract_job = job
@@ -729,6 +749,20 @@ class BaseWindowsMorphingToolsTestCase(test_base.CoriolisBaseTestCase):
         job.wait.assert_called_once()
         self.morphing_tools._download_and_expand_cloudbase_init.assert_not_called()
         self.assertIsNone(self.morphing_tools._cbslinit_extract_job)
+
+    def test_wait_cloudbase_init_extract_completes_inline_step(self):
+        session = mock.Mock()
+        session.target.return_value = mock.MagicMock()
+        session.target.return_value.__enter__.return_value = None
+        session.target.return_value.__exit__.return_value = None
+        self.morphing_tools._event_manager.inline_session = session
+        job = mock.Mock()
+        self.morphing_tools._cbslinit_extract_job = job
+        self.morphing_tools._download_and_expand_cloudbase_init = mock.Mock()
+        self.morphing_tools._wait_cloudbase_init_extract("https://example.com/z.zip")
+        session.complete.assert_called_once_with(
+            windows.constants.TASK_TYPE_OS_MORPHING_DOWNLOAD_CLOUDBASEINIT
+        )
 
     def test_wait_virtio_iso_joins_job(self):
         job = mock.Mock()

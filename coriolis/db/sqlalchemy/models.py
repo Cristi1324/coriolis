@@ -5,6 +5,7 @@ import uuid
 
 import sqlalchemy
 from oslo_db.sqlalchemy import models
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import orm, schema
 from sqlalchemy.ext import declarative
 
@@ -163,6 +164,15 @@ class Task(BASE, models.TimestampMixin, models.SoftDeleteMixin, models.ModelBase
     depends_on = sqlalchemy.Column(types.List, nullable=True)
     index = sqlalchemy.Column(sqlalchemy.Integer, nullable=False)
     on_error = sqlalchemy.Column(sqlalchemy.Boolean, nullable=False)
+    parent_task_id = sqlalchemy.Column(
+        sqlalchemy.String(36), sqlalchemy.ForeignKey('task.id'), nullable=True
+    )
+    inline = sqlalchemy.Column(
+        sqlalchemy.Boolean,
+        nullable=False,
+        default=False,
+        server_default=sqlalchemy.text('0'),
+    )
     # TODO(alexpilotti): Add soft delete filter
     events = orm.relationship(
         TaskEvent,
@@ -191,6 +201,8 @@ class Task(BASE, models.TimestampMixin, models.SoftDeleteMixin, models.ModelBase
             "depends_on": self.depends_on,
             "index": self.index,
             "on_error": self.on_error,
+            "parent_task_id": self.parent_task_id,
+            "inline": bool(self.inline),
             "events": [],
             "progress_updates": [],
             "created_at": self.created_at,
@@ -199,11 +211,12 @@ class Task(BASE, models.TimestampMixin, models.SoftDeleteMixin, models.ModelBase
             "deleted": self.deleted,
         }
 
-        for evt in self.events:
-            result["events"].append(evt.to_dict())
+        if not sa_inspect(self).detached:
+            for evt in self.events:
+                result["events"].append(evt.to_dict())
 
-        for pgu in self.progress_updates:
-            result["progress_updates"].append(pgu.to_dict())
+            for pgu in self.progress_updates:
+                result["progress_updates"].append(pgu.to_dict())
         return result
 
 

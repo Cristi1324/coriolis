@@ -14,7 +14,7 @@ from oslo_utils import timeutils
 from sqlalchemy import func, or_, orm
 from sqlalchemy.sql import null
 
-from coriolis import exception, utils
+from coriolis import constants, exception, utils
 from coriolis.db.sqlalchemy import models
 
 CONF = cfg.CONF
@@ -899,6 +899,44 @@ def set_task_status(context, task_id, status, exception_details=None):
     task = _get_task(context, task_id)
     task.status = status
     task.exception_details = exception_details
+
+
+@enginefacade.writer
+def add_inline_task(context, parent_task_id, task_type, depends_on=None):
+    parent = _get_task(context, parent_task_id)
+    if parent.status not in constants.ACTIVE_TASK_STATUSES:
+        raise exception.InvalidTaskState(
+            "Cannot create an inline task under parent '%s' while it is "
+            "in status '%s'." % (parent.id, parent.status)
+        )
+    last = (
+        _soft_delete_aware_query(context, models.Task)
+        .filter_by(execution_id=parent.execution_id)
+        .order_by(models.Task.index.desc())
+        .first()
+    )
+    task = models.Task()
+    task.id = str(uuid.uuid4())
+    task.execution_id = parent.execution_id
+    task.instance = parent.instance
+    task.host = parent.host
+    task.process_id = parent.process_id
+    task.status = constants.TASK_STATUS_RUNNING
+    task.task_type = task_type
+    task.depends_on = depends_on or []
+    task.index = (last.index + 1) if last else 1
+    task.on_error = False
+    task.parent_task_id = parent.id
+    task.inline = True
+    _session(context).add(task)
+    _session(context).flush()
+    return task
+
+
+@enginefacade.reader
+def get_inline_child_tasks(context, parent_task_id):
+    q = _soft_delete_aware_query(context, models.Task)
+    return q.filter_by(parent_task_id=parent_task_id, inline=True).all()
 
 
 @enginefacade.writer

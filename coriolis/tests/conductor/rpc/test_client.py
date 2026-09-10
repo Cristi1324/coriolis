@@ -260,6 +260,23 @@ class ConductorClientTestCase(test_base.CoriolisRPCClientTestCase):
         }
         self._test(self.client.add_task_event, args, rpc_op='_cast')
 
+    def test_create_inline_task(self):
+        args = {
+            "task_id": "mock_parent_id",
+            "task_type": "OS_MORPHING_PRE_OS_MOUNT",
+            "depends_on": ["mock_dep"],
+        }
+        self._test(self.client.create_inline_task, args)
+
+    def test_set_inline_task_status(self):
+        args = {
+            "task_id": "mock_parent_id",
+            "child_task_id": "mock_task_id",
+            "status": "COMPLETED",
+            "exception_details": None,
+        }
+        self._test(self.client.set_inline_task_status, args)
+
     def test_update_task_progress_update(self):
         args = {
             "task_id": "mock_task_id",
@@ -500,3 +517,19 @@ class ConductorTaskRpcEventHandlerTestCase(test_base.CoriolisBaseTestCase):
         mock_add_task_event.assert_called_once_with(
             self.ctxt, self.task_id, level, message
         )
+
+    @mock.patch.object(client.ConductorClient, 'create_inline_task')
+    def test_create_inline_task(self, mock_create_inline_task):
+        result = self.client.create_inline_task("OS_MORPHING_PRE_OS_MOUNT", ["dep"])
+        self.assertEqual(mock_create_inline_task.return_value, result)
+        mock_create_inline_task.assert_called_once_with(
+            self.ctxt,
+            self.task_id,
+            "OS_MORPHING_PRE_OS_MOUNT",
+            depends_on=["dep"],
+        )
+
+    def test_for_subtask(self):
+        child = self.client.for_subtask("child-id")
+        self.assertEqual(child._task_id, "child-id")
+        self.assertEqual(child._ctxt, self.ctxt)

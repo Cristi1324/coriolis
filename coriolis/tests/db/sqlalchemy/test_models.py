@@ -158,6 +158,8 @@ class TaskTestCase(test_base.CoriolisBaseTestCase):
         task.depends_on = mock.sentinel.depends_on
         task.index = mock.sentinel.index
         task.on_error = mock.sentinel.on_error
+        task.parent_task_id = mock.sentinel.parent_task_id
+        task.inline = True
         task.events = [mock_event1, mock_event2]
         task.progress_updates = [mock_progress_update1, mock_progress_update2]
         task.created_at = mock.sentinel.created_at
@@ -176,6 +178,8 @@ class TaskTestCase(test_base.CoriolisBaseTestCase):
             "depends_on": mock.sentinel.depends_on,
             "index": mock.sentinel.index,
             "on_error": mock.sentinel.on_error,
+            "parent_task_id": mock.sentinel.parent_task_id,
+            "inline": True,
             "events": [mock_event1.to_dict(), mock_event2.to_dict()],
             "progress_updates": [
                 mock_progress_update1.to_dict(),

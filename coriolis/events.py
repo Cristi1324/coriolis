@@ -137,3 +137,15 @@ class BaseEventHandler(object, with_metaclass(abc.ABCMeta)):
     @abc.abstractmethod
     def add_event(self, message, level=constants.TASK_EVENT_INFO):
         pass
+
+    def create_inline_task(self, task_type, depends_on=None):
+        """Create an inline child task. Default is a no-op."""
+        return None
+
+    def for_subtask(self, task_id):
+        """Return a handler that writes progress to the given task id."""
+        return self
+
+    def set_inline_task_status(self, task_id, status, exception_details=None):
+        """Set status on an inline child task. Default is a no-op."""
+        pass

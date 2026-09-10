@@ -2,6 +2,7 @@
 # All Rights Reserved.
 
 import base64
+import contextlib
 import copy
 import ipaddress
 import json
@@ -237,6 +238,9 @@ class BaseWindowsMorphingTools(base.BaseOSMorphingTools):
         self._product_name = detected_os_info['product_name']
         self._cbslinit_extract_job = None
         self._virtio_iso_job = None
+
+    def _inline_session(self):
+        return getattr(self._event_manager, "inline_session", None)
 
     def _get_worker_os_drive_path(self):
         return self._conn.exec_ps_command(
@@ -574,12 +578,19 @@ class BaseWindowsMorphingTools(base.BaseOSMorphingTools):
         if not download_url:
             LOG.info("No cloudbase-init ZIP URL. Skipping background extract.")
             return
-        self._cbslinit_extract_job = self._start_ssh_background_job(
-            self._build_cbslinit_extract_script(
-                download_url, self._get_cbslinit_base_dir()
-            ),
-            "Downloading cloudbase-init in the background",
-        )
+        if not isinstance(self._conn, windows_ssh.WindowsSSHConnection):
+            LOG.info("Background downloads are only used with Windows SSH. Skipping.")
+            return
+        session = self._inline_session()
+        step_id = constants.TASK_TYPE_OS_MORPHING_DOWNLOAD_CLOUDBASEINIT
+        ctx = session.target(step_id) if session else contextlib.nullcontext()
+        with ctx:
+            self._cbslinit_extract_job = self._start_ssh_background_job(
+                self._build_cbslinit_extract_script(
+                    download_url, self._get_cbslinit_base_dir()
+                ),
+                "Downloading cloudbase-init in the background",
+            )
 
     def _prefetch_virtio_iso(self, download_url=None):
         """Start virtio-win ISO download on a second SSH channel."""
@@ -589,17 +600,32 @@ class BaseWindowsMorphingTools(base.BaseOSMorphingTools):
         if not url:
             LOG.info("No virtio-win ISO URL. Skipping background download.")
             return
-        self._virtio_iso_job = self._start_ssh_background_job(
-            self._build_http_download_script(url, VIRTIO_WIN_ISO_PATH),
-            "Downloading virtio-win in the background",
-        )
+        if not isinstance(self._conn, windows_ssh.WindowsSSHConnection):
+            LOG.info("Background downloads are only used with Windows SSH. Skipping.")
+            return
+        session = self._inline_session()
+        step_id = constants.TASK_TYPE_OS_MORPHING_DOWNLOAD_VIRTIO
+        ctx = session.target(step_id) if session else contextlib.nullcontext()
+        with ctx:
+            self._virtio_iso_job = self._start_ssh_background_job(
+                self._build_http_download_script(url, VIRTIO_WIN_ISO_PATH),
+                "Downloading virtio-win in the background",
+            )
 
     def prefetch_packages(self):
         self._prefetch_cloudbase_init(self._get_cloudbase_init_zip_url())
         self._prefetch_virtio_iso()
 
     def abort_prefetch(self):
-        for attr in ("_cbslinit_extract_job", "_virtio_iso_job"):
+        session = self._inline_session()
+        mapping = (
+            (
+                "_cbslinit_extract_job",
+                constants.TASK_TYPE_OS_MORPHING_DOWNLOAD_CLOUDBASEINIT,
+            ),
+            ("_virtio_iso_job", constants.TASK_TYPE_OS_MORPHING_DOWNLOAD_VIRTIO),
+        )
+        for attr, step_id in mapping:
             job = getattr(self, attr, None)
             if job is None:
                 continue
@@ -607,6 +633,8 @@ class BaseWindowsMorphingTools(base.BaseOSMorphingTools):
             if abort:
                 abort()
             setattr(self, attr, None)
+            if session:
+                session.cancel(step_id)
 
     def _download_and_expand_cloudbase_init(self, download_url):
         self._event_manager.progress_update("Downloading cloudbase-init")
@@ -627,13 +655,27 @@ class BaseWindowsMorphingTools(base.BaseOSMorphingTools):
         setattr(self, attr, None)
 
     def _wait_cloudbase_init_extract(self, download_url):
-        if getattr(self, "_cbslinit_extract_job", None):
-            self._event_manager.progress_update("Waiting for cloudbase-init extract")
-        self._wait_background_job(
-            "_cbslinit_extract_job",
-            self._download_and_expand_cloudbase_init,
-            download_url,
-        )
+        session = self._inline_session()
+        step_id = constants.TASK_TYPE_OS_MORPHING_DOWNLOAD_CLOUDBASEINIT
+        try:
+            if getattr(self, "_cbslinit_extract_job", None):
+                ctx = session.target(step_id) if session else contextlib.nullcontext()
+                with ctx:
+                    self._event_manager.progress_update(
+                        "Waiting for cloudbase-init extract"
+                    )
+            self._wait_background_job(
+                "_cbslinit_extract_job",
+                self._download_and_expand_cloudbase_init,
+                download_url,
+            )
+        except Exception as err:
+            if session:
+                session.fail(step_id, err)
+            raise
+        else:
+            if session:
+                session.complete(step_id)
 
     def _download_virtio_iso(self, download_url):
         self._event_manager.progress_update("Downloading virtio-win drivers")
@@ -642,11 +684,25 @@ class BaseWindowsMorphingTools(base.BaseOSMorphingTools):
         )
 
     def _wait_virtio_iso(self, download_url):
-        if getattr(self, "_virtio_iso_job", None):
-            self._event_manager.progress_update("Waiting for virtio-win download")
-        self._wait_background_job(
-            "_virtio_iso_job", self._download_virtio_iso, download_url
-        )
+        session = self._inline_session()
+        step_id = constants.TASK_TYPE_OS_MORPHING_DOWNLOAD_VIRTIO
+        try:
+            if getattr(self, "_virtio_iso_job", None):
+                ctx = session.target(step_id) if session else contextlib.nullcontext()
+                with ctx:
+                    self._event_manager.progress_update(
+                        "Waiting for virtio-win download"
+                    )
+            self._wait_background_job(
+                "_virtio_iso_job", self._download_virtio_iso, download_url
+            )
+        except Exception as err:
+            if session:
+                session.fail(step_id, err)
+            raise
+        else:
+            if session:
+                session.complete(step_id)
 
     def _write_local_script(self, base_dir, script_path, priority=50):
         scripts_dir = self._get_cbslinit_scripts_dir(base_dir)

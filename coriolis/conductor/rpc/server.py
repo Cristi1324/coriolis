@@ -908,6 +908,8 @@ class ConductorServerEndpoint(object):
 
         newly_started_tasks = []
         for task in execution.tasks:
+            if getattr(task, "inline", False):
+                continue
             if not task.depends_on and (task.status == constants.TASK_STATUS_SCHEDULED):
                 LOG.info(
                     "Starting dependency-less task '%s' for execution '%s'",
@@ -2442,6 +2444,26 @@ class ConductorServerEndpoint(object):
         # iterate through and kill/cancel any non-error
         # tasks which are running/pending:
         for task in sorted(execution.tasks, key=lambda t: t.index):
+            if getattr(task, "inline", False) and task.status in (
+                constants.ACTIVE_TASK_STATUSES
+            ):
+                LOG.debug(
+                    "Canceling inline task '%s' as part of cancellation of "
+                    "execution '%s'.",
+                    task.id,
+                    execution.id,
+                )
+                db_api.set_task_status(
+                    ctxt,
+                    task.id,
+                    constants.TASK_STATUS_CANCELED
+                    if not force
+                    else constants.TASK_STATUS_FORCE_CANCELED,
+                    exception_details=(
+                        "This inline task was canceled with the parent tasks execution."
+                    ),
+                )
+                continue
             # if force is provided, force-cancel tasks directly:
             if force and task.status in itertools.chain(
                 constants.ACTIVE_TASK_STATUSES, [constants.TASK_STATUS_FAILED_TO_CANCEL]
@@ -2884,6 +2906,18 @@ class ConductorServerEndpoint(object):
         if constants.TASK_STATUS_SCHEDULED in status_vals and not (
             any([stat in status_vals for stat in constants.ACTIVE_TASK_STATUSES])
         ):
+            scheduled_non_inline = [
+                task_id
+                for task_id, stat in task_statuses.items()
+                if stat == constants.TASK_STATUS_SCHEDULED
+                and not getattr(
+                    next((t for t in execution.tasks if t.id == task_id), None),
+                    "inline",
+                    False,
+                )
+            ]
+            if not scheduled_non_inline:
+                return determined_state
             LOG.warn(
                 "Execution '%s' is deadlocked. Cleaning up now. Task statuses are: %s",
                 execution.id,
@@ -2951,7 +2985,9 @@ class ConductorServerEndpoint(object):
                 constants.TASK_STATUS_CANCELLING_AFTER_COMPLETION,
             ):
                 is_cancelling = True
-            if task.status == constants.TASK_STATUS_SCHEDULED:
+            if task.status == constants.TASK_STATUS_SCHEDULED and not getattr(
+                task, "inline", False
+            ):
                 has_scheduled_tasks = True
 
         status = constants.EXECUTION_STATUS_COMPLETED
@@ -3130,6 +3166,14 @@ class ConductorServerEndpoint(object):
         # NOTE: the tasks are saved in a random order in the DB, which
         # complicates the processing logic so we just pre-sort:
         for task in sorted(tasks_to_process, key=lambda t: t.index):
+            if getattr(task, "inline", False):
+                LOG.debug(
+                    "Skipping inline task '%s' during execution '%s' "
+                    "lifecycle iteration.",
+                    task.id,
+                    execution.id,
+                )
+                continue
             if task_statuses[task.id] == constants.TASK_STATUS_SCHEDULED:
                 # immediately start depency-less tasks (on-error or otherwise)
                 if not task_deps[task.id]:
@@ -3748,6 +3792,24 @@ class ConductorServerEndpoint(object):
                 task_type,
             )
 
+    def _finalize_inline_children(
+        self, ctxt, parent_task, status, exception_details=None
+    ):
+        if getattr(parent_task, "inline", False):
+            return
+        for child in db_api.get_inline_child_tasks(ctxt, parent_task.id):
+            if child.status not in constants.ACTIVE_TASK_STATUSES:
+                continue
+            LOG.info(
+                "Marking inline child '%s' of task '%s' as '%s'.",
+                child.id,
+                parent_task.id,
+                status,
+            )
+            db_api.set_task_status(
+                ctxt, child.id, status, exception_details=exception_details
+            )
+
     @parent_tasks_execution_synchronized
     def task_completed(self, ctxt, task_id, task_result):
         LOG.info("Task completed: %s", task_id)
@@ -3850,6 +3912,7 @@ class ConductorServerEndpoint(object):
                     constants.TASK_STATUS_COMPLETED,
                 )
             db_api.set_task_status(ctxt, task_id, constants.TASK_STATUS_COMPLETED)
+            self._finalize_inline_children(ctxt, task, constants.TASK_STATUS_COMPLETED)
 
         execution = db_api.get_tasks_execution(ctxt, task.execution_id)
         with lockutils.lock(
@@ -4137,6 +4200,15 @@ class ConductorServerEndpoint(object):
             final_status,
         )
         db_api.set_task_status(ctxt, task_id, final_status, exception_details)
+        self._finalize_inline_children(
+            ctxt,
+            task,
+            constants.TASK_STATUS_CANCELED,
+            exception_details=(
+                "Canceled because the parent task ended with status '%s'."
+                % final_status
+            ),
+        )
 
         task = db_api.get_task(ctxt, task_id)
         execution = db_api.get_tasks_execution(ctxt, task.execution_id)
@@ -4164,6 +4236,7 @@ class ConductorServerEndpoint(object):
                     for t in execution.tasks
                     if t.status in constants.ACTIVE_TASK_STATUSES
                     and t.task_type != constants.TASK_TYPE_OS_MORPHING
+                    and not getattr(t, "inline", False)
                 ]
                 if not running:
                     self._cancel_execution_for_osmorphing_debugging(ctxt, execution)
@@ -4237,6 +4310,50 @@ class ConductorServerEndpoint(object):
             )
         return db_api.add_task_progress_update(
             ctxt, task_id, message, initial_step=initial_step, total_steps=total_steps
+        )
+
+    @parent_tasks_execution_synchronized
+    def create_inline_task(self, ctxt, task_id, task_type, depends_on=None):
+        # task_id is the parent. The lock decorator requires this argument name.
+        parent = db_api.get_task(ctxt, task_id)
+        if not parent:
+            raise exception.NotFound("Task not found: %s" % task_id)
+        if getattr(parent, "inline", False):
+            raise exception.InvalidTaskState(
+                "Inline task '%s' cannot create child tasks." % parent.id
+            )
+        LOG.info("Creating inline task '%s' under parent '%s'", task_type, parent.id)
+        task = db_api.add_inline_task(ctxt, parent.id, task_type, depends_on=depends_on)
+        return task.to_dict()
+
+    @parent_tasks_execution_synchronized
+    def set_inline_task_status(
+        self,
+        ctxt,
+        task_id,
+        child_task_id,
+        status,
+        exception_details=None,
+    ):
+        # task_id is the parent. The lock decorator requires this argument name.
+        parent = db_api.get_task(ctxt, task_id)
+        child = db_api.get_task(ctxt, child_task_id)
+        if not parent:
+            raise exception.NotFound("Task not found: %s" % task_id)
+        if not child:
+            raise exception.NotFound("Task not found: %s" % child_task_id)
+        if not getattr(child, "inline", False) or child.parent_task_id != parent.id:
+            raise exception.InvalidTaskState(
+                "Task '%s' is not an inline child of '%s'." % (child_task_id, parent.id)
+            )
+        LOG.info(
+            "Setting inline task '%s' status to '%s' (parent '%s')",
+            child.id,
+            status,
+            parent.id,
+        )
+        db_api.set_task_status(
+            ctxt, child.id, status, exception_details=exception_details
         )
 
     @task_synchronized

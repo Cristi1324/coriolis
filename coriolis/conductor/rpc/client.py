@@ -400,6 +400,27 @@ class ConductorClient(rpc.BaseRPCClient):
             ctxt, 'add_task_event', task_id=task_id, level=level, message=message
         )
 
+    def create_inline_task(self, ctxt, task_id, task_type, depends_on=None):
+        return self._call(
+            ctxt,
+            'create_inline_task',
+            task_id=task_id,
+            task_type=task_type,
+            depends_on=depends_on,
+        )
+
+    def set_inline_task_status(
+        self, ctxt, task_id, child_task_id, status, exception_details=None
+    ):
+        self._call(
+            ctxt,
+            'set_inline_task_status',
+            task_id=task_id,
+            child_task_id=child_task_id,
+            status=status,
+            exception_details=exception_details,
+        )
+
     def add_task_progress_update(
         self, ctxt, task_id, message, initial_step=0, total_steps=0, return_event=False
     ):
@@ -683,4 +704,26 @@ class ConductorTaskRpcEventHandler(events.BaseEventHandler):
     def add_event(self, message, level=constants.TASK_EVENT_INFO):
         self._rpc_conductor_client.add_task_event(
             self._ctxt, self._task_id, level, message
+        )
+
+    def create_inline_task(self, task_type, depends_on=None):
+        return self._rpc_conductor_client.create_inline_task(
+            self._ctxt,
+            self._task_id,
+            task_type,
+            depends_on=depends_on,
+        )
+
+    def for_subtask(self, task_id):
+        handler = ConductorTaskRpcEventHandler(self._ctxt, task_id)
+        handler._rpc_conductor_client_instance = self._rpc_conductor_client_instance
+        return handler
+
+    def set_inline_task_status(self, task_id, status, exception_details=None):
+        self._rpc_conductor_client.set_inline_task_status(
+            self._ctxt,
+            self._task_id,
+            task_id,
+            status,
+            exception_details=exception_details,
         )
